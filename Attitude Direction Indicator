@@ -1,0 +1,616 @@
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Windows.Forms;
+using System.ComponentModel;
+
+public class AttitudeDirectionIndicator : Control
+{
+    // Attitude values
+    private float pitch = 0;   // degrees (-90 to 90)
+    private float roll = 0;    // degrees (-180 to 180)
+    private float targetRoll = 0;  // Target roll for auto-leveling
+    
+    // Auto-leveling properties
+    private bool autoLeveling = false;
+    private float levelingSpeed = 45;  // degrees per second for auto-leveling
+    
+    // Colors
+    private Color skyColor = Color.FromArgb(135, 206, 235);    // #87CEEB
+    private Color groundColor = Color.FromArgb(139, 69, 19);   // #8B4513
+    private Color markerColor = Color.White;
+    private Color outlineColor = Color.FromArgb(224, 224, 224); // #E0E0E0
+    private Color textColor = Color.White;
+    private Color bgColor = Color.FromArgb(44, 62, 80);        // #2C3E50
+    
+    // Casing colors
+    private Color casingDark = Color.FromArgb(40, 40, 40);     // Dark gray for casing shadows
+    private Color casingLight = Color.FromArgb(100, 100, 100); // Light gray for casing highlights
+    private Color casingMid = Color.FromArgb(70, 70, 70);      // Mid gray for casing main color
+    private Color screwColor = Color.FromArgb(180, 180, 180);  // Color for screw heads
+    
+    // Physics simulation
+    private float damping = 0.85f;  // Simulate slight resistance to movement
+    private bool isDragging = false;
+    private Point lastPos = Point.Empty;
+    
+    // Constants
+    private float pixelsPerDegree = 2;
+    private float maxPitch = 90;
+    private float maxRoll = 360;
+    
+    // Animation timer
+    private Timer animationTimer;
+    private DateTime lastUpdateTime;
+
+    public AttitudeDirectionIndicator()
+    {
+        // Enable double buffering to reduce flickering
+        this.DoubleBuffered = true;
+        
+        // Set default size
+        this.Size = new Size(400, 400);
+        
+        // Initialize animation timer
+        animationTimer = new Timer();
+        animationTimer.Interval = 16; // ~60 FPS
+        animationTimer.Tick += AnimationTimer_Tick;
+        animationTimer.Start();
+        
+        lastUpdateTime = DateTime.Now;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        
+        // Draw the complete ADI with all components and casing
+        DrawCasing(g);
+        
+        // Draw outer circle of the instrument
+        using (SolidBrush bgBrush = new SolidBrush(bgColor))
+        using (Pen outlinePen = new Pen(outlineColor, 4))
+        {
+            g.FillEllipse(bgBrush, GetInstrumentBounds());
+            g.DrawEllipse(outlinePen, GetInstrumentBounds());
+        }
+        
+        // Draw horizon (clipped to circular area)
+        DrawHorizon(g, pitch, roll);
+        
+        // Draw pitch ladder (clipped to circular area)
+        DrawPitchLadder(g, pitch, roll);
+        
+        // Draw fixed aircraft reference
+        DrawAircraftReference(g);
+        
+        // Draw roll indicator
+        DrawRollIndicator(g, roll);
+        
+        // Draw scale markings
+        DrawScaleMarkings(g);
+        
+        // Draw instructions and status
+        DrawTextInfo(g);
+    }
+
+    private Rectangle GetInstrumentBounds()
+    {
+        int radius = Math.Min(Width, Height) / 2 - 30;
+        return new Rectangle(
+            Width / 2 - radius, 
+            Height / 2 - radius, 
+            radius * 2, 
+            radius * 2
+        );
+    }
+
+    private float ConstrainAngle(float angle)
+    {
+        // Keep angle between -180 and 180 degrees
+        angle = angle % 360;
+        if (angle > 180)
+            angle -= 360;
+        if (angle < -180)
+            angle += 360;
+        return angle;
+    }
+
+    private void UpdateADI()
+    {
+        DateTime currentTime = DateTime.Now;
+        float dt = (float)(currentTime - lastUpdateTime).TotalSeconds;
+        lastUpdateTime = currentTime;
+        
+        // If auto-leveling is active, smoothly adjust roll toward target
+        if (autoLeveling)
+        {
+            // Calculate the difference between current and target roll
+            float rollDiff = targetRoll - roll;
+            
+            // If we're very close to the target, snap to it and stop auto-leveling
+            if (Math.Abs(rollDiff) < 0.5f)
+            {
+                roll = targetRoll;
+                autoLeveling = false;
+            }
+            else
+            {
+                // Calculate the maximum change allowed this frame
+                float maxChange = levelingSpeed * dt;
+                
+                // Apply the change, limiting to maxChange
+                if (Math.Abs(rollDiff) > maxChange)
+                {
+                    roll += Math.Sign(rollDiff) * maxChange;
+                }
+                else
+                {
+                    roll = targetRoll;
+                }
+                
+                // Ensure roll stays within bounds
+                roll = ConstrainAngle(roll);
+            }
+        }
+        
+        this.Invalidate(); // Trigger redraw
+    }
+
+    public void StartAutoLeveling()
+    {
+        // Initiate the auto-leveling process to return roll to horizontal
+        targetRoll = 0;
+        autoLeveling = true;
+    }
+
+    private void DrawHorizon(Graphics g, float pitch, float roll)
+    {
+        Rectangle bounds = GetInstrumentBounds();
+        int centerX = bounds.X + bounds.Width / 2;
+        int centerY = bounds.Y + bounds.Height / 2;
+        int radius = bounds.Width / 2;
+        
+        // Calculate horizon position based on pitch
+        float horizonY = pitch * pixelsPerDegree;
+        
+        // Create a bitmap for the horizon with transparency
+        using (Bitmap horizonBitmap = new Bitmap(bounds.Width, bounds.Height))
+        using (Graphics horizonGraphics = Graphics.FromImage(horizonBitmap))
+        {
+            horizonGraphics.SmoothingMode = SmoothingMode.AntiAlias;
+            
+            // Draw sky (upper half)
+            using (SolidBrush skyBrush = new SolidBrush(skyColor))
+            {
+                horizonGraphics.FillRectangle(skyBrush, 
+                    0, 0, bounds.Width, radius + horizonY);
+            }
+            
+            // Draw ground (lower half)
+            using (SolidBrush groundBrush = new SolidBrush(groundColor))
+            {
+                horizonGraphics.FillRectangle(groundBrush, 
+                    0, radius + horizonY, bounds.Width, radius - horizonY);
+            }
+            
+            // Apply circular clipping
+            using (GraphicsPath clipPath = new GraphicsPath())
+            {
+                clipPath.AddEllipse(0, 0, bounds.Width, bounds.Height);
+                horizonGraphics.SetClip(clipPath);
+                
+                // Now rotate the entire horizon according to roll
+                using (Bitmap rotatedBitmap = new Bitmap(bounds.Width, bounds.Height))
+                using (Graphics rotatedGraphics = Graphics.FromImage(rotatedBitmap))
+                {
+                    rotatedGraphics.SmoothingMode = SmoothingMode.AntiAlias;
+                    rotatedGraphics.TranslateTransform(bounds.Width / 2, bounds.Height / 2);
+                    rotatedGraphics.RotateTransform(roll);
+                    rotatedGraphics.TranslateTransform(-bounds.Width / 2, -bounds.Height / 2);
+                    rotatedGraphics.DrawImage(horizonBitmap, 0, 0);
+                    
+                    // Draw the rotated horizon onto the main graphics
+                    g.DrawImage(rotatedBitmap, bounds.X, bounds.Y);
+                }
+            }
+        }
+    }
+
+    private void DrawPitchLadder(Graphics g, float pitch, float roll)
+    {
+        Rectangle bounds = GetInstrumentBounds();
+        int centerX = bounds.X + bounds.Width / 2;
+        int centerY = bounds.Y + bounds.Height / 2;
+        int radius = bounds.Width / 2;
+        
+        float pitchIncrement = 10;  // degrees between lines
+        int lineLength = 30;
+        
+        // Create a bitmap for the pitch ladder with transparency
+        using (Bitmap ladderBitmap = new Bitmap(bounds.Width, bounds.Height))
+        using (Graphics ladderGraphics = Graphics.FromImage(ladderBitmap))
+        {
+            ladderGraphics.SmoothingMode = SmoothingMode.AntiAlias;
+            
+            // Apply circular clipping
+            using (GraphicsPath clipPath = new GraphicsPath())
+            {
+                clipPath.AddEllipse(0, 0, bounds.Width, bounds.Height);
+                ladderGraphics.SetClip(clipPath);
+                
+                // Calculate horizon position
+                float horizonY = pitch * pixelsPerDegree;
+                
+                // Draw horizon line first
+                using (Pen markerPen = new Pen(markerColor, 2))
+                {
+                    ladderGraphics.DrawLine(markerPen, 
+                        radius - lineLength, radius - horizonY,
+                        radius + lineLength, radius - horizonY);
+                }
+                
+                // Draw above horizon
+                using (Pen thinPen = new Pen(markerColor, 1))
+                using (Font font = new Font("Arial", 10))
+                using (SolidBrush textBrush = new SolidBrush(textColor))
+                {
+                    for (int i = (int)pitchIncrement; i <= maxPitch; i += (int)pitchIncrement)
+                    {
+                        float yPos = (i - pitch) * pixelsPerDegree;
+                        if (Math.Abs(yPos) > radius)
+                            continue;
+                            
+                        ladderGraphics.DrawLine(thinPen, 
+                            radius - lineLength / 2, radius - yPos,
+                            radius + lineLength / 2, radius - yPos);
+                        
+                        // Draw pitch value
+                        string text = i.ToString();
+                        SizeF textSize = ladderGraphics.MeasureString(text, font);
+                        ladderGraphics.DrawString(text, font, textBrush, 
+                            radius - lineLength / 2 - textSize.Width - 5, 
+                            radius - yPos - textSize.Height / 2);
+                        ladderGraphics.DrawString(text, font, textBrush, 
+                            radius + lineLength / 2 + 5, 
+                            radius - yPos - textSize.Height / 2);
+                    }
+                    
+                    // Draw below horizon
+                    for (int i = -(int)pitchIncrement; i >= -maxPitch; i -= (int)pitchIncrement)
+                    {
+                        float yPos = (i - pitch) * pixelsPerDegree;
+                        if (Math.Abs(yPos) > radius)
+                            continue;
+                            
+                        ladderGraphics.DrawLine(thinPen, 
+                            radius - lineLength / 2, radius - yPos,
+                            radius + lineLength / 2, radius - yPos);
+                        
+                        // Draw pitch value
+                        string text = Math.Abs(i).ToString();
+                        SizeF textSize = ladderGraphics.MeasureString(text, font);
+                        ladderGraphics.DrawString(text, font, textBrush, 
+                            radius - lineLength / 2 - textSize.Width - 5, 
+                            radius - yPos - textSize.Height / 2);
+                        ladderGraphics.DrawString(text, font, textBrush, 
+                            radius + lineLength / 2 + 5, 
+                            radius - yPos - textSize.Height / 2);
+                    }
+                }
+                
+                // Now rotate the ladder according to roll
+                using (Bitmap rotatedBitmap = new Bitmap(bounds.Width, bounds.Height))
+                using (Graphics rotatedGraphics = Graphics.FromImage(rotatedBitmap))
+                {
+                    rotatedGraphics.SmoothingMode = SmoothingMode.AntiAlias;
+                    rotatedGraphics.TranslateTransform(bounds.Width / 2, bounds.Height / 2);
+                    rotatedGraphics.RotateTransform(roll);
+                    rotatedGraphics.TranslateTransform(-bounds.Width / 2, -bounds.Height / 2);
+                    rotatedGraphics.DrawImage(ladderBitmap, 0, 0);
+                    
+                    // Draw the rotated ladder onto the main graphics
+                    g.DrawImage(rotatedBitmap, bounds.X, bounds.Y);
+                }
+            }
+        }
+    }
+
+    private void DrawAircraftReference(Graphics g)
+    {
+        Rectangle bounds = GetInstrumentBounds();
+        int centerX = bounds.X + bounds.Width / 2;
+        int centerY = bounds.Y + bounds.Height / 2;
+        
+        int wingWidth = 40;
+        int noseHeight = 10;
+        
+        // Draw wings
+        using (Pen markerPen = new Pen(markerColor, 3))
+        {
+            g.DrawLine(markerPen, 
+                centerX - wingWidth, centerY,
+                centerX + wingWidth, centerY);
+            
+            // Draw nose indicator
+            g.DrawLine(markerPen, 
+                centerX, centerY - noseHeight,
+                centerX, centerY);
+            
+            // Draw circle at center
+            g.FillEllipse(Brushes.White, centerX - 2.5f, centerY - 2.5f, 5, 5);
+        }
+    }
+
+    private void DrawRollIndicator(Graphics g, float roll)
+    {
+        Rectangle bounds = GetInstrumentBounds();
+        int centerX = bounds.X + bounds.Width / 2;
+        int centerY = bounds.Y + bounds.Height / 2;
+        int indicatorRadius = bounds.Width / 2 - 10;
+        
+        // Draw circle
+        using (Pen markerPen = new Pen(markerColor, 2))
+        {
+            g.DrawEllipse(markerPen, 
+                centerX - indicatorRadius, centerY - indicatorRadius,
+                indicatorRadius * 2, indicatorRadius * 2);
+            
+            // Draw roll marker
+            float rollRadians = (float)(roll * Math.PI / 180.0);
+            float markerX = centerX + indicatorRadius * (float)Math.Sin(rollRadians);
+            float markerY = centerY - indicatorRadius * (float)Math.Cos(rollRadians);
+            
+            g.DrawLine(markerPen, centerX, centerY, markerX, markerY);
+            
+            // Draw triangle marker at top
+            PointF[] triangle = new PointF[]
+            {
+                new PointF(centerX, centerY - indicatorRadius - 5),
+                new PointF(centerX - 5, centerY - indicatorRadius),
+                new PointF(centerX + 5, centerY - indicatorRadius)
+            };
+            g.FillPolygon(Brushes.White, triangle);
+        }
+    }
+
+    private void DrawScaleMarkings(Graphics g)
+    {
+        Rectangle bounds = GetInstrumentBounds();
+        int centerX = bounds.X + bounds.Width / 2;
+        int centerY = bounds.Y + bounds.Height / 2;
+        int radius = bounds.Width / 2;
+        
+        // Draw roll markings every 30 degrees
+        using (Pen thinPen = new Pen(markerColor, 1))
+        using (Font font = new Font("Arial", 10))
+        using (SolidBrush textBrush = new SolidBrush(textColor))
+        {
+            for (int i = 0; i < 360; i += 30)
+            {
+                double angle = i * Math.PI / 180.0;
+                float startX = centerX + (radius - 7) * (float)Math.Sin(angle);
+                float startY = centerY - (radius - 7) * (float)Math.Cos(angle);
+                float endX = centerX + (radius - 2) * (float)Math.Sin(angle);
+                float endY = centerY - (radius - 2) * (float)Math.Cos(angle);
+                
+                g.DrawLine(thinPen, startX, startY, endX, endY);
+                
+                // Draw numbers at cardinal points
+                if (i % 90 == 0)
+                {
+                    float textX = centerX + (radius - 15) * (float)Math.Sin(angle);
+                    float textY = centerY - (radius - 15) * (float)Math.Cos(angle);
+                    
+                    string textVal = i.ToString();
+                    if (i == 0) textVal = "0";
+                    else if (i == 90) textVal = "90";
+                    else if (i == 180) textVal = "180";
+                    else if (i == 270) textVal = "270";
+                    
+                    SizeF textSize = g.MeasureString(textVal, font);
+                    g.DrawString(textVal, font, textBrush, 
+                        textX - textSize.Width / 2, 
+                        textY - textSize.Height / 2);
+                }
+            }
+        }
+    }
+
+    private void DrawCasing(Graphics g)
+    {
+        Rectangle bounds = GetInstrumentBounds();
+        int centerX = bounds.X + bounds.Width / 2;
+        int centerY = bounds.Y + bounds.Height / 2;
+        int casingRadius = bounds.Width / 2 + 15;
+        
+        // Draw main casing body (dark outer ring)
+        using (SolidBrush casingBrush = new SolidBrush(casingDark))
+        {
+            g.FillEllipse(casingBrush, 
+                centerX - casingRadius, centerY - casingRadius,
+                casingRadius * 2, casingRadius * 2);
+        }
+        
+        // Draw mid casing (bezel)
+        using (SolidBrush casingBrush = new SolidBrush(casingMid))
+        {
+            g.FillEllipse(casingBrush, 
+                centerX - casingRadius + 5, centerY - casingRadius + 5,
+                (casingRadius - 5) * 2, (casingRadius - 5) * 2);
+        }
+        
+        // Draw inner casing (highlight)
+        using (SolidBrush casingBrush = new SolidBrush(casingLight))
+        {
+            g.FillEllipse(casingBrush, 
+                centerX - casingRadius + 10, centerY - casingRadius + 10,
+                (casingRadius - 10) * 2, (casingRadius - 10) * 2);
+        }
+        
+        // Draw screw mounts at cardinal points
+        using (SolidBrush screwBrush = new SolidBrush(screwColor))
+        using (SolidBrush screwDarkBrush = new SolidBrush(casingDark))
+        {
+            for (int angle = 0; angle < 360; angle += 90)
+            {
+                double radAngle = angle * Math.PI / 180.0;
+                float screwX = centerX + (casingRadius - 7) * (float)Math.Sin(radAngle);
+                float screwY = centerY - (casingRadius - 7) * (float)Math.Cos(radAngle);
+                
+                // Draw screw shadow (dark part)
+                g.FillEllipse(screwDarkBrush, screwX - 4, screwY - 4, 8, 8);
+                
+                // Draw screw head
+                g.FillEllipse(screwBrush, screwX - 3, screwY - 3, 6, 6);
+                
+                // Draw screw slot
+                g.DrawLine(new Pen(casingDark, 1), 
+                    screwX - 2, screwY, 
+                    screwX + 2, screwY);
+            }
+        }
+    }
+
+    private void DrawTextInfo(Graphics g)
+    {
+        using (Font font = new Font("Arial", 12))
+        using (SolidBrush textBrush = new SolidBrush(textColor))
+        {
+            // Draw instructions
+            string instructions = "Click and drag to adjust attitude";
+            SizeF textSize = g.MeasureString(instructions, font);
+            g.DrawString(instructions, font, textBrush, 
+                (Width - textSize.Width) / 2, Height - 30);
+            
+            // Draw auto-leveling status
+            string statusText = "Auto-leveling: " + (autoLeveling ? "ON" : "OFF");
+            g.DrawString(statusText, font, textBrush, 10, 10);
+        }
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        
+        if (e.Button == MouseButtons.Left)
+        {
+            isDragging = true;
+            lastPos = e.Location;
+            // Cancel auto-leveling when user starts dragging
+            autoLeveling = false;
+        }
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        
+        if (e.Button == MouseButtons.Left)
+        {
+            isDragging = false;
+            // Start auto-leveling when user releases mouse button
+            StartAutoLeveling();
+        }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        
+        if (isDragging)
+        {
+            float dx = e.X - lastPos.X;
+            float dy = e.Y - lastPos.Y;
+
+            // Adjust roll and pitch based on mouse movement
+            roll += dx * 0.2f;
+            pitch += dy * 0.05f;
+            
+            // Constrain values
+            roll = ConstrainAngle(roll);
+            pitch = Math.Max(Math.Min(pitch, maxPitch), -maxPitch);
+            
+            lastPos = e.Location;
+            this.Invalidate(); // Redraw
+        }
+    }
+
+    private void AnimationTimer_Tick(object sender, EventArgs e)
+    {
+        UpdateADI();
+    }
+
+    // Public properties for external control
+    [Category("ADI"), Description("Current pitch angle in degrees")]
+    public float Pitch
+    {
+        get { return pitch; }
+        set 
+        { 
+            pitch = Math.Max(Math.Min(value, maxPitch), -maxPitch);
+            this.Invalidate();
+        }
+    }
+
+    [Category("ADI"), Description("Current roll angle in degrees")]
+    public float Roll
+    {
+        get { return roll; }
+        set 
+        { 
+            roll = ConstrainAngle(value);
+            this.Invalidate();
+        }
+    }
+
+    [Category("ADI"), Description("Whether auto-leveling is active")]
+    public bool AutoLeveling
+    {
+        get { return autoLeveling; }
+        set { autoLeveling = value; }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            if (animationTimer != null)
+            {
+                animationTimer.Stop();
+                animationTimer.Dispose();
+            }
+        }
+        base.Dispose(disposing);
+    }
+}
+
+// Main form to host the ADI control
+public class MainForm : Form
+{
+    private AttitudeDirectionIndicator adi;
+
+    public MainForm()
+    {
+        // Set up the form
+        this.Text = "Attitude Direction Indicator";
+        this.Size = new Size(500, 550);
+        this.BackColor = Color.FromArgb(26, 35, 126); // Dark blue background
+        
+        // Create and add the ADI control
+        adi = new AttitudeDirectionIndicator();
+        adi.Dock = DockStyle.Fill;
+        this.Controls.Add(adi);
+    }
+
+    [STAThread]
+    static void Main()
+    {
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.Run(new MainForm());
+    }
+}
